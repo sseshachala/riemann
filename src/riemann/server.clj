@@ -75,7 +75,7 @@
                       opts)
         handler (tcp-handler core)
         server (start-tcp-server handler opts)] 
-      (info (str "TCP server " (select-keys [:host :port] opts) " online"))
+      (info (str "TCP server " (select-keys opts [:host :port]) " online"))
       server)))
 
 (defn udp-handler
