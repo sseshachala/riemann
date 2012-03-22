@@ -1,5 +1,5 @@
 (ns riemann.client
-  "Network client for connecting to a Riemann server. Usage:
+  "Network client for connecting to a Riemann server. Comprises a client protocol, a UDP, TCP, and combined implementation. Usage:
   
   (def c (tcp-client :host \"monitoring.local\"))
  
@@ -18,6 +18,9 @@
   to simply catch and log than to handle reconnecting yourself--but that said,
   I'm open to suggestions here."
 
+  (:import (java.net DatagramPacket 
+                     DatagramSocket 
+                     InetAddress))
   (:require [aleph.tcp])
   (:use [riemann.common])
   (:use [lamina.core])
@@ -25,6 +28,26 @@
   (:use [gloss.core])
   (:use [protobuf.core])
   (:use clojure.tools.logging))
+
+(defprotocol Client
+  "Riemann client protocol. Connects to a server, sends events, queries the index, and closes."
+  (open [this] "Open a connection.")
+  (close [this] "Close a connection.")
+  (send-event [this event] "Send an event.")
+  (query [this query] "Return a seq of matching events."))
+
+(deftype UDPClient [DatagramSocket])
+
+(extend ::UDPClient Client
+  {:open (fn [this]
+           (
+
+(defn- udp-socket
+  "Create a UDP socket for a client."
+  [client]
+  (doto (DatagramSocket.)
+    (.setSendBufferSize (or (:max-size client) 16384))
+    (.connect (InetAddress/getByName (:host client)))))
 
 (defn open-tcp-conn 
   "Opens a TCP connection on client. Modifies client's connection ref."
@@ -86,6 +109,23 @@
             host "localhost"}
        :as opts}]
   (let [c (struct tcp-client-struct host port (ref nil))]
+    (open-tcp-conn c)
+    c))
+
+(defn udp-client
+  "Create a new UDP client. Example:
+
+  (udp-client)
+  (udp-client :host \"foo\" :port 5555)"
+  [& { :keys [host port]
+       :or {port 5555
+            host "localhost"}
+       :as opts}]
+  (let [c (struct udp-client-struct
+                  host 
+                  port
+                  (udp-connection)
+                  )]
     (open-tcp-conn c)
     c))
 
