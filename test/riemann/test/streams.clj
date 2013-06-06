@@ -39,7 +39,7 @@
          (advance! (deref next-time#))))
      (let [result# (deref out#)]
        ; close stream
-       (stream# {:state "expired"})
+       (stream# {:state "expired" :time (unix-time)})
        result#)))
 
 (defmacro test-stream
@@ -505,7 +505,7 @@
                                  [{:service "cats"}])))
 
 
-         (testing "tagged"
+         (testing "tagged (one tag)"
                   (let [r (ref [])
                         s (where (tagged "foo") (append r))
                         events [{}
@@ -516,6 +516,69 @@
                     (doseq [e events] (s e))
                     (is (= (deref r)
                            [{:tags ["foo"]} {:tags ["foo" "bar"]}]))))
+
+         (testing "tagged-all (one tag)"
+                  (let [r (ref [])
+                        s (where (tagged-all "foo") (append r))
+                        events [{}
+                                {:tags []}
+                                {:tags ["blah"]}
+                                {:tags ["foo"]}
+                                {:tags ["foo" "bar"]}]]
+                    (doseq [e events] (s e))
+                    (is (= (deref r)
+                           [{:tags ["foo"]} {:tags ["foo" "bar"]}]))))
+
+         (testing "tagged-any (one tag)"
+                  (let [r (ref [])
+                        s (where (tagged-any "foo") (append r))
+                        events [{}
+                                {:tags []}
+                                {:tags ["blah"]}
+                                {:tags ["foo"]}
+                                {:tags ["foo" "bar"]}]]
+                    (doseq [e events] (s e))
+                    (is (= (deref r)
+                           [{:tags ["foo"]} {:tags ["foo" "bar"]}]))))
+
+         (testing "tagged (multiple tags)"
+                  (let [r (ref [])
+                        s (where (tagged ["foo" "bar"]) (append r))
+                        events [{}
+                                {:tags []}
+                                {:tags ["blah"]}
+                                {:tags ["foo"]}
+                                {:tags ["foo" "bar"]}
+                                {:tags ["foo" "bar" "baz"]}]]
+                    (doseq [e events] (s e))
+                    (is (= (deref r)
+                           [{:tags ["foo" "bar"]} {:tags ["foo" "bar" "baz"]}]))))
+
+         (testing "tagged-all (multiple tags)"
+                  (let [r (ref [])
+                        s (where (tagged-all ["foo" "bar"]) (append r))
+                        events [{}
+                                {:tags []}
+                                {:tags ["blah"]}
+                                {:tags ["foo"]}
+                                {:tags ["foo" "bar"]}
+                                {:tags ["foo" "bar" "baz"]}]]
+                    (doseq [e events] (s e))
+                    (is (= (deref r)
+                           [{:tags ["foo" "bar"]} {:tags ["foo" "bar" "baz"]}]))))
+
+         (testing "tagged-any (multiple tags)"
+                  (let [r (ref [])
+                        s (where (tagged-any ["foo" "bar"]) (append r))
+                        events [{}
+                                {:tags []}
+                                {:tags ["blah"]}
+                                {:tags ["foo"]}
+                                {:tags ["foo" "bar"]}
+                                {:tags ["baz" "bar"]}]]
+                    (doseq [e events] (s e))
+                    (is (= (deref r)
+                           [{:tags ["foo"]} {:tags ["foo" "bar"]} {:tags ["baz" "bar"]}]))))
 
          (testing "else"
                   ; Where should take an else clause.
@@ -547,8 +610,20 @@
                   ; matched.
                   (is (= true  ((where (service "foo")) {:service "foo"})))
                   (is (= false ((where (service "foo")) {:service "bar"})))
+
                   (is (= true  ((where (tagged "foo")) {:tags ["foo"]})))
-                  (is (= nil ((where (tagged "foo")) {:tags ["bar"]})))
+                  (is (= false ((where (tagged "foo")) {:tags ["bar"]})))
+                  (is (= true  ((where (tagged-all "foo")) {:tags ["foo"]})))
+                  (is (= false ((where (tagged-all "foo")) {:tags ["bar"]})))
+                  (is (= true  ((where (tagged-any "foo")) {:tags ["foo"]})))
+                  (is (= false ((where (tagged-any "foo")) {:tags ["bar"]})))
+
+                  (is (= true  ((where (tagged ["foo" "bar"])) {:tags ["foo" "bar"]})))
+                  (is (= false ((where (tagged ["foo" "bar"])) {:tags ["bar"]})))
+                  (is (= true  ((where (tagged-all ["foo" "bar"])) {:tags ["foo" "bar"]})))
+                  (is (= false ((where (tagged-all ["foo" "bar"])) {:tags ["bar"]})))
+                  (is (= true ((where (tagged-any ["foo" "bar"])) {:tags ["foo" "bar"]})))
+                  (is (= false ((where (tagged-any ["foo" "bar"])) {:tags ["blah"]})))
 
                   (is (= true ((where (service "foo") 
                                       (fn [event] 2)) 
@@ -1176,6 +1251,64 @@
            
            (s b2)
            (is (= (set @out) #{b2 c1}))))
+
+(deftest stable-test
+         ; Doesn't emit until dt seconds have passed.
+         (test-stream (stable 3 :x)
+                      [{:x 1 :time 0} {:x 1 :time 1} {:x 1 :time 2}]
+                      [])
+ 
+         ; Constant values are emitted after dt seconds
+         (test-stream (stable 3 :x)
+                      [{:x 1 :time 0} {:x 1 :time 1} {:x 1 :time 3}]
+                      [{:x 1 :time 0} {:x 1 :time 1} {:x 1 :time 3}])
+
+         ; Ignores spikes
+         (test-stream (stable 3 :x)
+                      [{:x 0 :time 0}
+                       {:x 0 :time 3}
+                       {:x 1 :time 4}
+                       {:x 1 :time 5}
+                       {:x 0 :time 6}
+                       {:x 0 :time 9}]
+                      [{:x 0 :time 0}
+                       {:x 0 :time 3}
+                       ; spike elided
+                       {:x 0 :time 6}
+                       {:x 0 :time 9}])
+
+         ; Ignores flapping
+         (test-stream (stable 3 :x)
+                      [{:x 0 :time 0}
+                       {:x 0 :time 10}
+                       {:x 1 :time 11}
+                       {:x 0 :time 11}
+                       {:x 1 :time 12}
+                       {:x 5 :time 13}
+                       {:x 2 :time 14}
+                       {:x 2 :time 17}]
+                      [{:x 0 :time 0}
+                       {:x 0 :time 10}
+                       {:x 2 :time 14}
+                       {:x 2 :time 17}])
+
+         ; Triggers after dt seconds of stability, even without new events.
+         (test-stream-intervals (stable 10 :x)
+                                [{:x 0 :time 0} 1
+                                 {:x 1 :time 1} 10
+                                 {:x 2 :time 11} 1]
+                                [{:x 1 :time 1}])
+
+         ; Triggers after dt seconds with new events.
+         (reset-time!)
+         (test-stream-intervals (stable 10 :x)
+                                [{:x 0 :time 0} 1
+                                 {:x 0 :time 1} 4
+                                 {:x 0 :time 5} 6
+                                 {:x 1 :time 11} 1]
+                                [{:x 0 :time 0}
+                                 {:x 0 :time 1}
+                                 {:x 0 :time 5}]))
 
 (deftest project-test
          ; Empty -> empty

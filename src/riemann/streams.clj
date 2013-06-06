@@ -1077,40 +1077,45 @@ OA
       (call-rescue event children)
       true)))
 
+(defn tagged-all?
+  "Predicate function to check if a collection of tags is
+  present in the tags of event."
+  [tags event]
+  (set/subset? (set tags) (set (:tags event))))
+
 (defn tagged-all
   "Passes on events where all tags are present. This stream returns true if an
   event it receives matches those tags, nil otherwise.
 
+  Can be used as a predicate in a where form.
+
   (tagged-all \"foo\" prn)
   (tagged-all [\"foo\" \"bar\"] prn)"
   [tags & children]
-  (if (coll? tags)
+  (let [tag-coll (flatten [tags])]
     (fn stream [event]
-      (when (set/subset? (set tags) (set (:tags event)))
-        (call-rescue event children)
-        true))
-
-    (fn stream [event]
-      (when (member? tags (:tags event))
+      (when (tagged-all? tag-coll event)
         (call-rescue event children)
         true))))
+
+(defn tagged-any?
+  "Predicate function to check if any of a collection of tags
+  are present in the tags of event."
+  [tags event]
+  (not= nil (some (set tags) (:tags event))))
 
 (defn tagged-any
   "Passes on events where any of tags are present. This stream returns true if
   an event it receives matches those tags, nil otherwise.
 
+  Can be used as a predicate in a where form.
+
   (tagged-any \"foo\" prn)
   (tagged-all [\"foo\" \"bar\"] prn)"
   [tags & children]
-  (if (coll? tags)
-    (let [required (set tags)]
-      (fn stream [event]
-        (when (some required (:tags event))
-          (call-rescue event children)
-          true)))
-
+  (let [tag-coll (flatten [tags])]
     (fn stream [event]
-      (when (member? tags (:tags event))
+      (when (tagged-any? tag-coll event)
         (call-rescue event children)
         true))))
 
@@ -1342,10 +1347,12 @@ OA
         (call-rescue event children)))))
 
 (defn- where-test [k v]
-  (case k
+  (condp some [k]
     ; Tagged checks that v is a member of tags.
-    'tagged (list 'when (list :tags 'event)
-                  (list 'riemann.common/member? v (list :tags 'event)))
+    #{'tagged 'tagged-all} (list 'when (list :tags 'event)
+                             (list 'tagged-all? (list 'flatten [v]) 'event))
+    #{'tagged-any} (list 'when (list :tags 'event)
+                     (list 'tagged-any? (list 'flatten [v]) 'event))
     ; Otherwise, match.
     (list 'riemann.common/match v (list (keyword k) 'event))))
 
@@ -1367,7 +1374,9 @@ OA
                'ttl
                'description
                'tags
-               'tagged}]
+               'tagged
+               'tagged-all
+               'tagged-any}]
     (if (list? expr)
       ; This is a list.
       (if (syms (first expr))
@@ -1577,6 +1586,97 @@ OA
               (last events))))
       (apply sdo children))))
 
+(defn stable
+  "A stream which detects stable groups of events over time. Takes a time
+  period in seconds, and a function of events. Passes on all events for which
+  (f event1) is equal to (f event2), for each successive pair of events, for at
+  least dt seconds. Use (stable) to filter out transient spikes and flapping
+  states.
+
+  In these plots, stable events are shown as =, and unstable events are shown
+  as -. = events are passed to children, and - events are ignored.
+
+       A spike           Flapping           Stable changes
+  |                 |                    |                    
+  |       -         |    -- -   ======   |      =====        
+  |                 |        -           |           ========
+  |======= ======   |====  -  --         |======              
+  +------------->   +---------------->   +------------------>
+        time              time                  time
+
+  May buffer events for up to dt seconds when the value of (f event) changes,
+  in order to determine if the new value is stable or not.
+  
+  ; Passes on events where the state remains the same for at least five
+  ; seconds.
+  (stable 5 :state prn)"
+  [dt f & children]
+  (let [state (atom {:prev   ::unknown
+                     :task   nil
+                     :out    (list)
+                     :buffer []})
+
+        ; Called by our timeout task dt seconds after a state transition;
+        ; ensures that we flush the buffer if no new events have arrived.
+        timeout (fn timeout []
+                  (let [es (-> state
+                             (swap!
+                               (fn [state]
+                                 (let [e (first (:buffer state))]
+                                   (if (and e
+                                            (<= dt (- (unix-time)
+                                                      (:time e))))
+                                     ; Flush!
+                                     (merge state {:out (:buffer state)
+                                                   :buffer []})
+                                     ; Either the buffer was flushed already,
+                                     ; or the event we were meant to flush was
+                                     ; replaced by another.
+                                     state))))
+                             :out)]
+                    (doseq [e es]
+                      (call-rescue e children))))
+
+        update (fn update [state event]
+                 (let [value (f event)
+                       buffer (:buffer state)]
+;                   (prn :event event)
+;                   (prn :state state)
+                   (if (= value (:prev state))
+                     ; This event is the same as before.
+                     (if (empty? buffer)
+                       ; We're stable; flush this event immediately.
+                       (assoc state :out (list event))
+                       
+                       ; We're buffering.
+                       (let [buffer (conj buffer event)]
+                         (if (<= dt (- (:time event) (:time (first buffer))))
+                           ; We're now stable. Flush buffer.
+                           (merge state {:out buffer
+                                         :buffer []})
+
+                           ; Still buffering.
+                           (merge state {:out (list)
+                                         :buffer buffer}))))
+
+                     ; This event is different than the one before it; skip
+                     {:prev value
+                      :out (list)
+                      :buffer [event]})))]
+
+    (fn stream [event]
+      (let [state (swap! state update event)]
+        (when (= 1 (count (:buffer state)))
+          ; We just replaced the buffer with a single event, which means the
+          ; value *just* changed. In N seconds we may need to flush the buffer,
+          ; if the value doesn't change. We *could* track the task to do this,
+          ; but it's simpler to just add N tasks during a flapping state and
+          ; let them all fight it out.
+          (once! (+ dt (:time (first (:buffer state))))
+                 timeout))
+
+        (doseq [e (:out state)]
+          (call-rescue e children))))))
 
 (defn project*
   "Like project, but takes predicate *functions* instead of where expressions."
