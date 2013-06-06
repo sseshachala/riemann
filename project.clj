@@ -1,4 +1,4 @@
-(defproject riemann "0.2.2-SNAPSHOT"
+(defproject riemann "0.2.3-SNAPSHOT"
   :description 
 "A network event stream processor. Intended for analytics, metrics, and alerting; and to glue various monitoring systems together."
   :url "http://github.com/aphyr/riemann"
@@ -35,7 +35,7 @@
     [log4j/apache-log4j-extras "1.0"]
     [org.antlr/antlr "3.2"]
     [org.slf4j/slf4j-log4j12 "1.6.4"]
-    [riemann-clojure-client "0.2.5"]
+    [riemann-clojure-client "0.2.6"]
     [slingshot "0.10.2"]
     [clj-campfire "2.1.0"]
     [less-awful-ssl "0.1.0"]
